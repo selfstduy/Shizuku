@@ -16,6 +16,8 @@ local.properties
 
 # OS
 .DS_Store
+._*
+**/._*
 Thumbs.db
 
 # Signing or local secrets

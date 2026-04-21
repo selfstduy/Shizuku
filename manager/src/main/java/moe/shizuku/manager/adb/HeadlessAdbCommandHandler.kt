@@ -23,6 +23,8 @@ class HeadlessAdbCommandHandler(context: Context) {
         const val METHOD_ADB_PAIR = "adbPair"
         const val METHOD_ADB_START = "adbStart"
         const val METHOD_ADB_PAIR_AND_START = "adbPairAndStart"
+        const val METHOD_ADB_PAIRING_NOTIFY_START = "adbPairingNotifyStart"
+        const val METHOD_ADB_PAIRING_NOTIFY_STOP = "adbPairingNotifyStop"
 
         const val EXTRA_OK = "ok"
         const val EXTRA_ERROR = "error"
@@ -35,10 +37,12 @@ class HeadlessAdbCommandHandler(context: Context) {
         const val EXTRA_DISCOVERY_TIMEOUT = "discovery_timeout_ms"
         const val EXTRA_START_TIMEOUT = "start_timeout_ms"
         const val EXTRA_WAIT_FOR_SERVER = "wait_for_server"
+        const val EXTRA_ENABLE_TCPIP_5555 = "enable_tcpip_5555"
 
         private const val DEFAULT_HOST = "127.0.0.1"
         private const val DEFAULT_DISCOVERY_TIMEOUT = 15_000L
         private const val DEFAULT_START_TIMEOUT = 10_000L
+        private const val DEFAULT_ENABLE_TCPIP_5555 = false
     }
 
     private val appContext = context.applicationContext
@@ -51,6 +55,8 @@ class HeadlessAdbCommandHandler(context: Context) {
         return method == METHOD_ADB_PAIR
             || method == METHOD_ADB_START
             || method == METHOD_ADB_PAIR_AND_START
+            || method == METHOD_ADB_PAIRING_NOTIFY_START
+            || method == METHOD_ADB_PAIRING_NOTIFY_STOP
     }
 
     fun handle(method: String, arg: String?, extras: Bundle?): Bundle {
@@ -58,12 +64,17 @@ class HeadlessAdbCommandHandler(context: Context) {
 
         val safeExtras = extras ?: Bundle.EMPTY
         val log = StringBuilder()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            return failure("Headless wireless adb commands require Android 11+", log)
+        }
 
         return try {
             when (method) {
                 METHOD_ADB_PAIR -> pair(arg, safeExtras, log)
                 METHOD_ADB_START -> start(safeExtras, log)
                 METHOD_ADB_PAIR_AND_START -> pairAndStart(arg, safeExtras, log)
+                METHOD_ADB_PAIRING_NOTIFY_START -> startPairingNotification(log)
+                METHOD_ADB_PAIRING_NOTIFY_STOP -> stopPairingNotification(log)
                 else -> failure("Unsupported method: $method", log)
             }
         } catch (tr: Throwable) {
@@ -103,23 +114,35 @@ class HeadlessAdbCommandHandler(context: Context) {
         val discoveryTimeout = readLong(extras, EXTRA_DISCOVERY_TIMEOUT, DEFAULT_DISCOVERY_TIMEOUT)
         val startTimeout = readLong(extras, EXTRA_START_TIMEOUT, DEFAULT_START_TIMEOUT)
         val waitForServer = readBoolean(extras, EXTRA_WAIT_FOR_SERVER, true)
+        val enableTcpip5555 = readBoolean(extras, EXTRA_ENABLE_TCPIP_5555, DEFAULT_ENABLE_TCPIP_5555)
         val key = createKey()
         val connectPort = readInt(extras, EXTRA_CONNECT_PORT) ?: discoverPort(AdbMdns.TLS_CONNECT, discoveryTimeout, log)
             ?: error("Wireless adb connect port not found")
 
-        startServer(host, connectPort, key, log)
+        val startServerResult = startServer(host, connectPort, key, enableTcpip5555, discoveryTimeout, log)
+        val finalConnectPort = startServerResult.connectPort
 
         val serverReady = if (waitForServer) waitForServer(startTimeout, log) else Shizuku.pingBinder()
         if (waitForServer && !serverReady) {
             return failure("Shizuku binder was not received after startup", log)
+        }
+        if (serverReady) {
+            ShizukuSettings.setLastLaunchMode(ShizukuSettings.LaunchMethod.ADB)
+            log.appendLine("Saved launch mode as ADB for boot auto-start.")
         }
 
         return success(
             log,
             Bundle().apply {
                 putString(EXTRA_HOST, host)
-                putInt(EXTRA_CONNECT_PORT, connectPort)
+                putInt(EXTRA_CONNECT_PORT, finalConnectPort)
                 putBoolean("server_ready", serverReady)
+                startServerResult.connectPortBeforeRestart?.let {
+                    putInt("connect_port_before_restart", it)
+                }
+                if (enableTcpip5555) {
+                    putInt("tcpip_port", 5555)
+                }
             }
         )
     }
@@ -137,13 +160,43 @@ class HeadlessAdbCommandHandler(context: Context) {
         return connectResult
     }
 
+    private fun startPairingNotification(log: StringBuilder): Bundle {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            appContext.startForegroundService(AdbPairingService.startIntent(appContext))
+        } else {
+            appContext.startService(AdbPairingService.startIntent(appContext))
+        }
+        log.appendLine("Started pairing notification service.")
+        return success(log)
+    }
+
+    private fun stopPairingNotification(log: StringBuilder): Bundle {
+        appContext.stopService(AdbPairingService.stopIntent(appContext))
+        log.appendLine("Stopped pairing notification service.")
+        return success(log)
+    }
+
     private fun createKey(): AdbKey {
         return AdbKey(PreferenceAdbKeyStore(ShizukuSettings.getPreferences()), "shizuku")
     }
 
-    private fun startServer(host: String, connectPort: Int, key: AdbKey, log: StringBuilder) {
+    private data class StartServerResult(
+        val connectPort: Int,
+        val connectPortBeforeRestart: Int?
+    )
+
+    private fun startServer(
+        host: String,
+        connectPort: Int,
+        key: AdbKey,
+        enableTcpip5555: Boolean,
+        discoveryTimeout: Long,
+        log: StringBuilder
+    ): StartServerResult {
         val output = StringBuilder()
         log.appendLine("Connecting to wireless adb at $host:$connectPort ...")
+        var finalConnectPort = connectPort
+        var connectPortBeforeRestart: Int? = null
 
         AdbClient(host, connectPort, key).use { client ->
             client.connect()
@@ -156,11 +209,48 @@ class HeadlessAdbCommandHandler(context: Context) {
                     log.appendLine()
                 }
             }
+            if (enableTcpip5555) {
+                enableClassicTcpipAdb(client) { line ->
+                    log.appendLine(line)
+                }
+                connectPortBeforeRestart = connectPort
+                val refreshedConnectPort = rediscoverConnectPortAfterAdbdRestart(discoveryTimeout, log)
+                if (refreshedConnectPort != null) {
+                    finalConnectPort = refreshedConnectPort
+                    if (refreshedConnectPort != connectPort) {
+                        log.appendLine("Wireless adb connect port changed after adbd restart: $connectPort -> $refreshedConnectPort")
+                    } else {
+                        connectPortBeforeRestart = null
+                        log.appendLine("Wireless adb connect port remains $connectPort after adbd restart.")
+                    }
+                } else {
+                    log.appendLine("Could not rediscover connect port after adbd restart. Keep using previous port $connectPort.")
+                }
+            }
         }
 
         if (output.isEmpty()) {
             log.appendLine("Starter command returned no output.")
         }
+
+        return StartServerResult(
+            connectPort = finalConnectPort,
+            connectPortBeforeRestart = connectPortBeforeRestart
+        )
+    }
+
+    private fun rediscoverConnectPortAfterAdbdRestart(timeoutMillis: Long, log: StringBuilder): Int? {
+        val settleMillis = minOf(1_500L, timeoutMillis.coerceAtLeast(0L))
+        if (settleMillis > 0) {
+            try {
+                Thread.sleep(settleMillis)
+            } catch (_: InterruptedException) {
+                Thread.currentThread().interrupt()
+            }
+        }
+        val rediscoveryTimeout = maxOf(2_000L, timeoutMillis - settleMillis)
+        log.appendLine("Re-discovering wireless adb connect port after adbd restart ...")
+        return discoverPort(AdbMdns.TLS_CONNECT, rediscoveryTimeout, log)
     }
 
     private fun starterCommand(): String {

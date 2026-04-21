@@ -74,6 +74,36 @@ https://github.com/RikkaApps/Shizuku-API#migration-guide-for-existing-applicatio
 
 The `:manager:assembleDebug` task generates a debuggable server. You can attach a debugger to `shizuku_server` to debug the server. Be aware that, in Android Studio, "Run/Debug configurations" - "Always install with package manager" should be checked, so that the server will use the latest code.
 
+### Headless (ADB-only) workflow
+
+This branch supports controlling Shizuku without opening any activity UI:
+
+1. Install APK on target device.
+2. (Android 13+) Grant notification permission from host so pairing notification can be shown:
+   - `adb shell pm grant moe.shizuku.privileged.api android.permission.POST_NOTIFICATIONS`
+3. Start notification pairing flow from host:
+   - `./scripts/adb-headless.sh pair-notify-start`
+   - PowerShell: `./scripts/adb-pair-and-start.ps1 -PairNotifyStart`
+4. On the target device, open "Wireless debugging" and input the 6-digit pairing code from Shizuku notification.
+5. Start Shizuku from host:
+   - `./scripts/adb-headless.sh start`
+   - PowerShell: `./scripts/adb-pair-and-start.ps1 -StartOnly`
+   - By default, this keeps wireless debugging on dynamic TLS port and does not switch to `tcpip:5555`.
+   - If you really need `5555`, add `--enable-tcpip-5555` (or `-EnableTcpip5555` on PowerShell).
+
+Optional one-shot flow (input code on host terminal):
+
+- `./scripts/adb-headless.sh pair-start --pairing-code 123456`
+- Stop notification pairing search: `./scripts/adb-headless.sh pair-notify-stop`
+
+Raw provider methods for `adb shell content call`:
+
+- `adbPair`
+- `adbStart`
+- `adbPairAndStart`
+- `adbPairingNotifyStart`
+- `adbPairingNotifyStop`
+
 ## License
 
 All code files in this project are licensed under Apache 2.0

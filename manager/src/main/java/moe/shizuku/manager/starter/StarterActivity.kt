@@ -18,6 +18,7 @@ import moe.shizuku.manager.adb.AdbClient
 import moe.shizuku.manager.adb.AdbKey
 import moe.shizuku.manager.adb.AdbKeyException
 import moe.shizuku.manager.adb.PreferenceAdbKeyStore
+import moe.shizuku.manager.adb.enableClassicTcpipAdb
 import moe.shizuku.manager.app.AppBarActivity
 import moe.shizuku.manager.databinding.StarterActivityBinding
 import rikka.lifecycle.Resource
@@ -182,6 +183,10 @@ private class ViewModel(context: Context, root: Boolean, host: String?, port: In
                 connect()
                 shellCommand(Starter.internalCommand) {
                     sb.append(String(it))
+                    postResult()
+                }
+                enableClassicTcpipAdb(this) { line ->
+                    sb.appendLine(line)
                     postResult()
                 }
                 close()

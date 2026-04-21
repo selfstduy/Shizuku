@@ -2,6 +2,12 @@ plugins {
     id("idea")
 }
 
+def localBuildRoot = new File(System.getProperty("user.home"), ".shizuku-build")
+allprojects {
+    def projectSegment = project.path == ":" ? "root" : project.path.substring(1).replace(":", "/")
+    layout.buildDirectory.set(new File(localBuildRoot, projectSegment))
+}
+
 idea.module {
     excludeDirs += file('out')
 }
@@ -22,6 +28,7 @@ subprojects {
             }
         }
     }
+
 }
 
 apply from: 'api/manifest.gradle'

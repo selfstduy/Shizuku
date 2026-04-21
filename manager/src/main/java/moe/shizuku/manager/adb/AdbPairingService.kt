@@ -40,7 +40,7 @@ class AdbPairingService : Service() {
             return Intent(context, AdbPairingService::class.java).setAction(startAction)
         }
 
-        private fun stopIntent(context: Context): Intent {
+        fun stopIntent(context: Context): Intent {
             return Intent(context, AdbPairingService::class.java).setAction(stopAction)
         }
 
